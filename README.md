@@ -80,7 +80,7 @@ Sidebar is open. Close it. Trust me.
 
 **Does it work on other sites?**
 
-Just Box for now. Different sites render docs differently.
+Box and **DocSend** decks now. The extension detects which one you're on and uses the right capture method (Box renders to `<canvas>`; DocSend serves each slide as an image, which we fetch directly for full quality). Different sites render docs differently, so each needs its own adapter — PRs welcome for more.
 
 ---
 
