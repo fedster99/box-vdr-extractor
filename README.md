@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="extension/icon128.png" alt="Box VDR Extractor" width="100">
+  <img src="extension/icon128.png" alt="Box & DocSend VDR Extractor" width="100">
 </p>
 
-<h1 align="center">Box VDR Extractor</h1>
+<h1 align="center">Box & DocSend VDR Extractor</h1>
 
 <p align="center">
   <img src="https://img.shields.io/github/stars/fedster99/box-vdr-extractor?style=social" alt="Stars">

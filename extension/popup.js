@@ -1,4 +1,4 @@
-// popup.js - VDR & Deck Extractor Chrome Extension
+// popup.js - Box & DocSend VDR Extractor Chrome Extension
 
 // Site adapters: how to detect each supported viewer and probe its readiness.
 const SITES = {

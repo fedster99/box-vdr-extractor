@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "VDR & Deck Extractor",
+  "name": "Box & DocSend VDR Extractor",
   "version": "1.2.0",
   "description": "Extract documents from Box Virtual Data Rooms and DocSend decks as PDF",
   "permissions": ["activeTab", "scripting"],
