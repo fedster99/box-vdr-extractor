@@ -69,16 +69,19 @@
   const pageDataBase = getPageDataBase();
   if (pageDataBase) {
     console.log(`🔗 page_data endpoint: ${pageDataBase}<N>`);
-  } else {
-    console.warn('⚠️ No page_data URL found — will fall back to capturing on-page images.');
   }
 
   // --- Capture strategies ----------------------------------------------------
 
-  // Decode a blob into a dataURL + natural dimensions via an <img>.
+  // Decode a blob into a dataURL + natural dimensions via an <img>. DocSend
+  // serves page images as `binary/octet-stream`, so we normalize the blob to
+  // image/jpeg — otherwise the FileReader data URL carries the wrong MIME and
+  // jsPDF can choke on it.
   function blobToImage(blob) {
+    const typed = blob.type && blob.type.startsWith('image/')
+      ? blob : new Blob([blob], { type: 'image/jpeg' });
     return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(blob);
+      const url = URL.createObjectURL(typed);
       const img = new Image();
       img.onload = () => {
         const reader = new FileReader();
@@ -87,83 +90,52 @@
           resolve({ data: reader.result, width: img.naturalWidth, height: img.naturalHeight });
         };
         reader.onerror = reject;
-        reader.readAsDataURL(blob);
+        reader.readAsDataURL(typed);
       };
       img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
       img.src = url;
     });
   }
 
-  // Fetch an image URL and decode it. Uses credentials:'same-origin' on
-  // purpose: cookies are sent to docsend.com (authorizes page_data), but the
-  // page_data endpoint 302-redirects to a *signed* CloudFront URL that responds
-  // with `Access-Control-Allow-Origin: *`. A credentialed request against a
-  // wildcard ACAO is rejected by the browser, so we must NOT send credentials
-  // cross-origin — 'same-origin' drops them on the redirect, and the signed
-  // query string authorizes the CloudFront request on its own.
-  async function fetchImage(url) {
-    const res = await fetch(url, { credentials: 'same-origin' });
+  // Capture one page via the page_data endpoint.
+  //
+  // page_data/N returns JSON: { imageUrl, directImageUrl, documentLinks, ... }.
+  // imageUrl is a freshly-signed CloudFront URL. We must fetch a FRESH one each
+  // time: the URL DocSend already loaded into the <img> is cached by the browser
+  // *without* CORS headers (the <img> load wasn't a CORS request), so re-fetching
+  // that exact URL is blocked. A newly-signed URL isn't in that cache, so
+  // CloudFront serves it with proper CORS headers and the fetch succeeds.
+  //
+  // credentials:'same-origin' sends cookies to docsend.com (authorizes
+  // page_data) but not to CloudFront (which authorizes via the signed query
+  // string), avoiding the "wildcard ACAO + credentials" rejection.
+  async function fetchPage(pageNum) {
+    const res = await fetch(pageDataBase + pageNum, { credentials: 'same-origin' });
     if (!res.ok) return null;
-    const ct = res.headers.get('content-type') || '';
-    if (ct.includes('application/json')) {
-      // Some DocSend variants return JSON pointing at the image URL.
-      const json = await res.json();
-      const imgUrl = json.imageUrl || json.url || json.image || json.src;
-      if (!imgUrl) return null;
-      const imgRes = await fetch(imgUrl, { credentials: 'same-origin' });
-      if (!imgRes.ok) return null;
-      return await blobToImage(await imgRes.blob());
-    }
-    return await blobToImage(await res.blob());
+    const json = await res.json();
+    const imgUrl = json.imageUrl || json.directImageUrl || json.url || json.image;
+    if (!imgUrl) return null;
+    const imgRes = await fetch(imgUrl, { credentials: 'same-origin' });
+    if (!imgRes.ok) return null;
+    return await blobToImage(await imgRes.blob());
   }
 
-  function getViewerImg(pageNum) {
-    return document.querySelector(`img.preso-view.page-view[data-pagenum="${pageNum}"]`);
-  }
-  function resolvedSrc(img) {
-    const src = img && (img.currentSrc || img.src) || '';
-    return /^https?:/.test(src) && !/whitey|loader|loading|\.gif($|\?)/i.test(src) ? src : null;
-  }
-
-  // Drive the carousel to page N so DocSend resolves and lazy-loads its image,
-  // then return that page's signed image URL once it's in place.
-  async function resolvePageUrl(pageNum) {
-    let img = getViewerImg(pageNum);
-    if (img) img.scrollIntoView({ behavior: 'instant', block: 'center' });
-    const next = document.querySelector('.right.carousel-control, .carousel-control.right');
-    const start = Date.now();
-    while (Date.now() - start < 5000) {
-      img = getViewerImg(pageNum);
-      const url = resolvedSrc(img);
-      if (url) return url;
-      if (next) next.click();
-      await wait(150);
-    }
-    return resolvedSrc(getViewerImg(pageNum));
-  }
-
-  // Capture one page: prefer the signed URL already resolved on the live <img>
-  // (guaranteed valid — the page just loaded it); fall back to the page_data
-  // endpoint for pages the carousel hasn't materialized.
   async function capturePage(pageNum) {
-    try {
-      const url = await resolvePageUrl(pageNum);
-      if (url) {
-        const cap = await fetchImage(url);
-        if (cap) return cap;
-      }
-    } catch (e) {
-      console.warn(`page ${pageNum} via DOM url failed:`, e.message);
-    }
-    if (pageDataBase) {
+    for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const cap = await fetchImage(pageDataBase + pageNum);
+        const cap = await fetchPage(pageNum);
         if (cap) return cap;
       } catch (e) {
-        console.warn(`page ${pageNum} via page_data failed:`, e.message);
+        if (attempt === 0) { await humanDelay(200, 400); continue; }
+        console.warn(`page ${pageNum} failed:`, e.message);
       }
     }
     return null;
+  }
+
+  if (!pageDataBase) {
+    console.error('❌ No page_data endpoint found — cannot extract this document.');
+    return finish();
   }
 
   // --- Main capture loop ---
@@ -179,7 +151,7 @@
     } else {
       console.error(`❌ Page ${pageNum}: Failed`);
     }
-    await humanDelay(60, 140);
+    await humanDelay(40, 90);
   }
 
   // --- Build PDF ---
