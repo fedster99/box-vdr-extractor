@@ -94,61 +94,76 @@
     });
   }
 
-  // Strategy A: fetch the same-origin page_data endpoint.
-  async function fetchPage(pageNum) {
-    if (!pageDataBase) return null;
-    try {
-      const res = await fetch(pageDataBase + pageNum, { credentials: 'include' });
-      if (!res.ok) return null;
-      const ct = res.headers.get('content-type') || '';
-      if (ct.includes('application/json')) {
-        // Some DocSend variants return JSON pointing at the image URL.
-        const json = await res.json();
-        const imgUrl = json.imageUrl || json.url || json.image || json.src;
-        if (!imgUrl) return null;
-        const imgRes = await fetch(imgUrl, { credentials: 'include' });
-        if (!imgRes.ok) return null;
-        return await blobToImage(await imgRes.blob());
-      }
-      return await blobToImage(await res.blob());
-    } catch (e) {
-      console.warn(`fetch page ${pageNum} failed:`, e.message);
-      return null;
+  // Fetch an image URL and decode it. Uses credentials:'same-origin' on
+  // purpose: cookies are sent to docsend.com (authorizes page_data), but the
+  // page_data endpoint 302-redirects to a *signed* CloudFront URL that responds
+  // with `Access-Control-Allow-Origin: *`. A credentialed request against a
+  // wildcard ACAO is rejected by the browser, so we must NOT send credentials
+  // cross-origin — 'same-origin' drops them on the redirect, and the signed
+  // query string authorizes the CloudFront request on its own.
+  async function fetchImage(url) {
+    const res = await fetch(url, { credentials: 'same-origin' });
+    if (!res.ok) return null;
+    const ct = res.headers.get('content-type') || '';
+    if (ct.includes('application/json')) {
+      // Some DocSend variants return JSON pointing at the image URL.
+      const json = await res.json();
+      const imgUrl = json.imageUrl || json.url || json.image || json.src;
+      if (!imgUrl) return null;
+      const imgRes = await fetch(imgUrl, { credentials: 'same-origin' });
+      if (!imgRes.ok) return null;
+      return await blobToImage(await imgRes.blob());
     }
+    return await blobToImage(await res.blob());
   }
 
-  // Strategy B: navigate the carousel and capture the live <img> via canvas.
   function getViewerImg(pageNum) {
     return document.querySelector(`img.preso-view.page-view[data-pagenum="${pageNum}"]`);
   }
-  function isLoaded(img) {
-    return img && img.complete && img.naturalWidth > 50 &&
-      !/whitey|loader|loading/i.test(img.currentSrc || img.src || '');
+  function resolvedSrc(img) {
+    const src = img && (img.currentSrc || img.src) || '';
+    return /^https?:/.test(src) && !/whitey|loader|loading|\.gif($|\?)/i.test(src) ? src : null;
   }
-  async function captureFromDom(pageNum) {
+
+  // Drive the carousel to page N so DocSend resolves and lazy-loads its image,
+  // then return that page's signed image URL once it's in place.
+  async function resolvePageUrl(pageNum) {
     let img = getViewerImg(pageNum);
     if (img) img.scrollIntoView({ behavior: 'instant', block: 'center' });
-    // Advance carousel toward this page so DocSend lazy-loads it.
     const next = document.querySelector('.right.carousel-control, .carousel-control.right');
     const start = Date.now();
-    while (Date.now() - start < 4000) {
+    while (Date.now() - start < 5000) {
       img = getViewerImg(pageNum);
-      if (isLoaded(img)) break;
+      const url = resolvedSrc(img);
+      if (url) return url;
       if (next) next.click();
       await wait(150);
     }
-    img = getViewerImg(pageNum);
-    if (!isLoaded(img)) return null;
+    return resolvedSrc(getViewerImg(pageNum));
+  }
+
+  // Capture one page: prefer the signed URL already resolved on the live <img>
+  // (guaranteed valid — the page just loaded it); fall back to the page_data
+  // endpoint for pages the carousel hasn't materialized.
+  async function capturePage(pageNum) {
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      canvas.getContext('2d').drawImage(img, 0, 0);
-      return { data: canvas.toDataURL('image/jpeg', 0.95), width: canvas.width, height: canvas.height };
+      const url = await resolvePageUrl(pageNum);
+      if (url) {
+        const cap = await fetchImage(url);
+        if (cap) return cap;
+      }
     } catch (e) {
-      console.error(`Canvas capture failed for page ${pageNum} (likely cross-origin):`, e.message);
-      return null;
+      console.warn(`page ${pageNum} via DOM url failed:`, e.message);
     }
+    if (pageDataBase) {
+      try {
+        const cap = await fetchImage(pageDataBase + pageNum);
+        if (cap) return cap;
+      } catch (e) {
+        console.warn(`page ${pageNum} via page_data failed:`, e.message);
+      }
+    }
+    return null;
   }
 
   // --- Main capture loop ---
@@ -156,8 +171,7 @@
   const captures = new Map();
 
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-    let cap = await fetchPage(pageNum);
-    if (!cap) cap = await captureFromDom(pageNum);
+    const cap = await capturePage(pageNum);
 
     if (cap) {
       captures.set(pageNum, cap);
